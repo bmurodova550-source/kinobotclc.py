@@ -3,32 +3,30 @@ import threading
 from flask import Flask
 import telebot
 from telebot import types
-from pymongo import MongoClient, ASCENDING
+from pymongo import MongoClient
 
 TOKEN = "8650420595:AAGsWFJX-mYCGWUPI0UltoxG0KK6Q-X4n6c"
 ADMIN_ID = 6968399046
 MONGO_URL = "mongodb+srv://tojiyevjavohir67_db_user:jtwASN46W0zU9sw7@cluster0.pysrg0q.mongodb.net/?appName=Cluster0"
 
 CHANNELS = [
-    "@clc_kino"
+    "@kanal_username"
 ]
 
 bot = telebot.TeleBot(TOKEN)
-client = MongoClient(MONGO_URL)
 
+client = MongoClient(MONGO_URL)
 db = client["kino_bot"]
 movies = db["movies"]
 users = db["users"]
 
-movies.create_index([("code", ASCENDING)], unique=True)
-users.create_index([("user_id", ASCENDING)], unique=True)
-
 admin_states = {}
+
 app = Flask(__name__)
 
 
 def is_admin(user_id):
-    return user_id == ADMIN_ID
+    return int(user_id) == int(ADMIN_ID)
 
 
 def save_user(message):
@@ -41,9 +39,9 @@ def save_user(message):
         {
             "$set": {
                 "user_id": user.id,
-                "first_name": user.first_name,
-                "last_name": user.last_name,
-                "username": user.username,
+                "first_name": user.first_name or "",
+                "last_name": user.last_name or "",
+                "username": user.username or "",
             }
         },
         upsert=True
@@ -57,10 +55,13 @@ def check_subscription(user_id):
     for channel in CHANNELS:
         try:
             member = bot.get_chat_member(channel, user_id)
+            print("SUB STATUS:", user_id, channel, member.status)
+
             if member.status in ["left", "kicked"]:
                 return False
+
         except Exception as e:
-            print("Obuna tekshirish xatosi:", e)
+            print("OBUNA TEKSHIRISH XATOSI:", e)
             return False
 
     return True
@@ -72,8 +73,8 @@ def subscribe_keyboard():
     for channel in CHANNELS:
         markup.add(
             types.InlineKeyboardButton(
-                f"📢 Obuna bo'lish: {channel}",
-                url=f"https://t.me/{channel[1:]}"
+                text=f"📢 Obuna bo'lish: {channel}",
+                url=f"https://t.me/{channel.replace('@', '')}"
             )
         )
 
@@ -91,12 +92,18 @@ def admin_panel():
 
 
 def send_admin_panel(chat_id):
-    bot.send_message(chat_id, "👨‍💻 Admin panel:", reply_markup=admin_panel())
+    bot.send_message(
+        chat_id,
+        "👨‍💻 Admin panel:",
+        reply_markup=admin_panel()
+    )
 
 
 @bot.message_handler(commands=["start"])
 def start(message):
+    print("START BOSILDI:", message.from_user.id)
     save_user(message)
+
     user_id = message.from_user.id
 
     if is_admin(user_id):
@@ -114,99 +121,107 @@ def start(message):
 
     bot.send_message(
         message.chat.id,
-        "🎬 Xush kelibsiz!\n\n"
-        "🔢 Kino kodini yuboring."
+        "🎬 Xush kelibsiz!\n\n🔢 Kino kodini yuboring."
     )
 
 
-@bot.message_handler(commands=["admin", "panel"])
+@bot.message_handler(commands=["admin"])
 def admin_command(message):
     if is_admin(message.from_user.id):
         send_admin_panel(message.chat.id)
 
 
-@bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
-    user_id = call.from_user.id
-    data = call.data
+@bot.callback_query_handler(func=lambda call: call.data == "check_sub")
+def check_sub(call):
+    if check_subscription(call.from_user.id):
+        bot.answer_callback_query(call.id, "✅ Obuna tasdiqlandi!")
+        bot.send_message(
+            call.message.chat.id,
+            "✅ Obuna tasdiqlandi!\n\n🎬 Endi kino kodini yuboring."
+        )
+    else:
+        bot.answer_callback_query(call.id, "❌ Hali obuna bo'lmagansiz!")
+        bot.send_message(
+            call.message.chat.id,
+            "❌ Siz hali kanalga obuna bo'lmagansiz.\n\n📢 Avval kanalga obuna bo'ling.",
+            reply_markup=subscribe_keyboard()
+        )
 
-    if data == "check_sub":
-        if check_subscription(user_id):
-            bot.answer_callback_query(call.id, "✅ Obuna tasdiqlandi!")
-            bot.send_message(
-                call.message.chat.id,
-                "✅ Obuna tasdiqlandi!\n\n🎬 Endi kino kodini yuboring."
-            )
-        else:
-            bot.answer_callback_query(call.id, "❌ Hali obuna bo'lmagansiz!")
-            bot.send_message(
-                call.message.chat.id,
-                "❌ Siz hali kanalga obuna bo'lmagansiz.\n\n"
-                "📢 Avval kanalga obuna bo'ling.",
-                reply_markup=subscribe_keyboard()
-            )
+
+@bot.callback_query_handler(func=lambda call: call.data == "add_movie")
+def add_movie(call):
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "❌ Siz admin emassiz!")
         return
 
-    if not is_admin(user_id):
+    bot.answer_callback_query(call.id)
+    admin_states[call.from_user.id] = {"step": "waiting_code"}
+
+    bot.send_message(
+        call.message.chat.id,
+        "➕ Kino qo'shish boshlandi.\n\n🔢 Kino kodini yuboring. Masalan: 1"
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "delete_movie")
+def delete_movie(call):
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "❌ Siz admin emassiz!")
+        return
+
+    bot.answer_callback_query(call.id)
+    admin_states[call.from_user.id] = {"step": "delete_code"}
+
+    bot.send_message(
+        call.message.chat.id,
+        "🗑 O'chirmoqchi bo'lgan kino kodini yuboring:"
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "movie_list")
+def movie_list(call):
+    if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "❌ Siz admin emassiz!")
         return
 
     bot.answer_callback_query(call.id)
 
-    if data == "add_movie":
-        admin_states[user_id] = {"step": "waiting_code"}
-        bot.send_message(
-            call.message.chat.id,
-            "➕ Kino qo'shish boshlandi.\n\n"
-            "🔢 Kino kodini yuboring.\n"
-            "Masalan: 123"
-        )
+    all_movies = list(movies.find().sort("_id", -1).limit(100))
+
+    if not all_movies:
+        bot.send_message(call.message.chat.id, "📭 Hozircha kinolar yo'q.", reply_markup=admin_panel())
         return
 
-    if data == "delete_movie":
-        admin_states[user_id] = {"step": "delete_code"}
-        bot.send_message(
-            call.message.chat.id,
-            "🗑 Kino o'chirish.\n\n"
-            "🔢 O'chirmoqchi bo'lgan kino kodini yuboring:"
-        )
+    text = "🎬 Kinolar ro'yxati:\n\n"
+
+    for i, movie in enumerate(all_movies, start=1):
+        text += f"{i}. 🔢 Kod: {movie.get('code')}\n"
+        text += f"🎞 Nomi: {movie.get('caption', 'Nomsiz')}\n\n"
+
+    if len(text) > 4000:
+        text = text[:4000] + "\n\n..."
+
+    bot.send_message(call.message.chat.id, text, reply_markup=admin_panel())
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "stats")
+def stats(call):
+    if not is_admin(call.from_user.id):
+        bot.answer_callback_query(call.id, "❌ Siz admin emassiz!")
         return
 
-    if data == "movie_list":
-        all_movies = list(movies.find().sort("_id", -1).limit(100))
+    bot.answer_callback_query(call.id)
 
-        if not all_movies:
-            bot.send_message(
-                call.message.chat.id,
-                "📭 Hozircha kinolar yo'q.",
-                reply_markup=admin_panel()
-            )
-            return
+    users_count = users.count_documents({})
+    movies_count = movies.count_documents({})
 
-        text = "🎬 Kinolar ro'yxati:\n\n"
-
-        for index, movie in enumerate(all_movies, start=1):
-            text += f"{index}. 🔢 Kod: {movie.get('code')}\n"
-            text += f"🎞 Nomi: {movie.get('caption', 'Nomsiz')}\n\n"
-
-        if len(text) > 4000:
-            text = text[:4000] + "\n\n..."
-
-        bot.send_message(call.message.chat.id, text, reply_markup=admin_panel())
-        return
-
-    if data == "stats":
-        users_count = users.count_documents({})
-        movies_count = movies.count_documents({})
-
-        bot.send_message(
-            call.message.chat.id,
-            "📊 Bot statistikasi:\n\n"
-            f"👥 Start bosgan odamlar: {users_count}\n"
-            f"🎬 Kinolar soni: {movies_count}",
-            reply_markup=admin_panel()
-        )
-        return
+    bot.send_message(
+        call.message.chat.id,
+        "📊 Bot statistikasi:\n\n"
+        f"👥 Start bosgan odamlar: {users_count}\n"
+        f"🎬 Kinolar soni: {movies_count}",
+        reply_markup=admin_panel()
+    )
 
 
 @bot.message_handler(content_types=["video"])
@@ -225,37 +240,33 @@ def handle_video(message):
         )
         return
 
-    code = state["code"]
+    code = state.get("code")
     caption = message.caption or f"🎬 Kino\n🔢 Kod: {code}"
 
-    try:
-        movies.insert_one({
-            "code": code,
-            "file_id": message.video.file_id,
-            "caption": caption
-        })
+    movies.update_one(
+        {"code": code},
+        {
+            "$set": {
+                "code": code,
+                "file_id": message.video.file_id,
+                "caption": caption
+            }
+        },
+        upsert=True
+    )
 
-        admin_states.pop(user_id, None)
+    admin_states.pop(user_id, None)
 
-        bot.send_message(
-            message.chat.id,
-            f"✅ Kino muvaffaqiyatli qo'shildi!\n\n🔢 Kod: {code}",
-            reply_markup=admin_panel()
-        )
-
-    except Exception as e:
-        print("Kino saqlash xatosi:", e)
-        admin_states.pop(user_id, None)
-
-        bot.send_message(
-            message.chat.id,
-            "❌ Kino saqlanmadi. Bu kod oldin qo'shilgan bo'lishi mumkin.",
-            reply_markup=admin_panel()
-        )
+    bot.send_message(
+        message.chat.id,
+        f"✅ Kino saqlandi!\n\n🔢 Kod: {code}",
+        reply_markup=admin_panel()
+    )
 
 
 @bot.message_handler(content_types=["text"])
 def handle_text(message):
+    print("TEXT KELDI:", message.from_user.id, message.text)
     save_user(message)
 
     user_id = message.from_user.id
@@ -265,21 +276,9 @@ def handle_text(message):
         state = admin_states.get(user_id)
 
         if state:
-            step = state.get("step")
-
-            if step == "waiting_code":
+            if state.get("step") == "waiting_code":
                 if not text.isdigit():
-                    bot.send_message(
-                        message.chat.id,
-                        "❌ Kod faqat raqam bo'lishi kerak.\n\n🔢 Qayta kod yuboring:"
-                    )
-                    return
-
-                if movies.find_one({"code": text}):
-                    bot.send_message(
-                        message.chat.id,
-                        "❌ Bu kod oldin qo'shilgan.\n\n🔢 Boshqa kod yuboring:"
-                    )
+                    bot.send_message(message.chat.id, "❌ Kod faqat raqam bo'lishi kerak. Masalan: 1")
                     return
 
                 admin_states[user_id] = {
@@ -289,26 +288,18 @@ def handle_text(message):
 
                 bot.send_message(
                     message.chat.id,
-                    f"✅ Kod qabul qilindi: {text}\n\n🎥 Endi kinoni video qilib yuboring:"
+                    f"✅ Kod qabul qilindi: {text}\n\n🎥 Endi video yuboring:"
                 )
                 return
 
-            if step == "delete_code":
+            if state.get("step") == "delete_code":
                 result = movies.delete_one({"code": text})
                 admin_states.pop(user_id, None)
 
                 if result.deleted_count:
-                    bot.send_message(
-                        message.chat.id,
-                        f"✅ Kino o'chirildi!\n\n🔢 Kod: {text}",
-                        reply_markup=admin_panel()
-                    )
+                    bot.send_message(message.chat.id, f"✅ Kino o'chirildi!\n\n🔢 Kod: {text}", reply_markup=admin_panel())
                 else:
-                    bot.send_message(
-                        message.chat.id,
-                        "❌ Bunday kodli kino topilmadi.",
-                        reply_markup=admin_panel()
-                    )
+                    bot.send_message(message.chat.id, "❌ Bunday kodli kino topilmadi.", reply_markup=admin_panel())
                 return
 
         if text.isdigit():
@@ -321,11 +312,7 @@ def handle_text(message):
                     caption=movie.get("caption", "")
                 )
             else:
-                bot.send_message(
-                    message.chat.id,
-                    "😕 Bu kod bo'yicha kino topilmadi.",
-                    reply_markup=admin_panel()
-                )
+                bot.send_message(message.chat.id, "😕 Bu kod bo'yicha kino topilmadi.", reply_markup=admin_panel())
             return
 
         send_admin_panel(message.chat.id)
@@ -373,8 +360,9 @@ def run_bot():
 
     try:
         bot.remove_webhook()
+        print("✅ Webhook o'chirildi")
     except Exception as e:
-        print("Webhook o'chirish xatosi:", e)
+        print("Webhook xatosi:", e)
 
     bot.infinity_polling(
         timeout=60,
@@ -385,11 +373,5 @@ def run_bot():
 
 if __name__ == "__main__":
     PORT = int(os.environ.get("PORT", 5000))
-
     threading.Thread(target=run_bot, daemon=True).start()
-
-    app.run(
-        host="0.0.0.0",
-        port=PORT,
-        debug=False
-    )
+    app.run(host="0.0.0.0", port=PORT, debug=False)
